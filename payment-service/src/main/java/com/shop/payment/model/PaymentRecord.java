@@ -1,12 +1,9 @@
 package com.shop.payment.model;
 
 import javax.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-/**
- * 支付记录实体类
- * 存储支付的详细信息
- */
 @Entity
 @Table(name = "payment_records")
 public class PaymentRecord {
@@ -15,23 +12,20 @@ public class PaymentRecord {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // 关联的订单ID
+    @Column(nullable = false)
     private String orderId;
 
-    // 支付单号（唯一）
     @Column(unique = true, nullable = false)
     private String paymentNo;
 
-    // 支付金额（使用 double，存在精度问题）
-    private double amount;
+    // 使用 BigDecimal 保证金额精度
+    @Column(precision = 12, scale = 2)
+    private BigDecimal amount;
 
-    // 支付状态：PENDING, PROCESSING, SUCCESS, FAILED
     private String status;
 
-    // 第三方网关交易号
     private String gatewayTxnId;
 
-    // 错误信息
     private String errorMessage;
 
     private LocalDateTime createTime;
@@ -40,7 +34,7 @@ public class PaymentRecord {
     public PaymentRecord() {
     }
 
-    public PaymentRecord(String orderId, String paymentNo, double amount) {
+    public PaymentRecord(String orderId, String paymentNo, BigDecimal amount) {
         this.orderId = orderId;
         this.paymentNo = paymentNo;
         this.amount = amount;
@@ -49,7 +43,6 @@ public class PaymentRecord {
         this.updateTime = LocalDateTime.now();
     }
 
-    // Getters and Setters
     public Long getId() {
         return id;
     }
@@ -74,11 +67,11 @@ public class PaymentRecord {
         this.paymentNo = paymentNo;
     }
 
-    public double getAmount() {
+    public BigDecimal getAmount() {
         return amount;
     }
 
-    public void setAmount(double amount) {
+    public void setAmount(BigDecimal amount) {
         this.amount = amount;
     }
 

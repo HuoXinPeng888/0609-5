@@ -8,12 +8,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.util.Map;
 
-/**
- * 支付控制器
- * 提供支付相关的 REST API
- */
 @RestController
 @RequestMapping("/api/payments")
 public class PaymentController {
@@ -26,10 +23,6 @@ public class PaymentController {
         this.paymentService = paymentService;
     }
 
-    /**
-     * 发起支付
-     * POST /api/payments
-     */
     @PostMapping
     public ResponseEntity<?> processPayment(@RequestBody PaymentRequest request) {
         try {
@@ -50,10 +43,6 @@ public class PaymentController {
         }
     }
 
-    /**
-     * 查询支付状态
-     * GET /api/payments/{orderId}
-     */
     @GetMapping("/{orderId}")
     public ResponseEntity<?> getPaymentStatus(@PathVariable String orderId) {
         try {
@@ -68,10 +57,6 @@ public class PaymentController {
         }
     }
 
-    /**
-     * 退款
-     * POST /api/payments/{paymentId}/refund
-     */
     @PostMapping("/{paymentId}/refund")
     public ResponseEntity<?> refund(@PathVariable Long paymentId) {
         try {
@@ -92,12 +77,9 @@ public class PaymentController {
         }
     }
 
-    /**
-     * 支付请求体
-     */
     public static class PaymentRequest {
         private String orderId;
-        private double amount;
+        private BigDecimal amount;
 
         public String getOrderId() {
             return orderId;
@@ -107,11 +89,11 @@ public class PaymentController {
             this.orderId = orderId;
         }
 
-        public double getAmount() {
+        public BigDecimal getAmount() {
             return amount;
         }
 
-        public void setAmount(double amount) {
+        public void setAmount(BigDecimal amount) {
             this.amount = amount;
         }
     }

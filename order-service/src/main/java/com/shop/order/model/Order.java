@@ -1,12 +1,9 @@
 package com.shop.order.model;
 
 import javax.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-/**
- * 订单实体类
- * 存储订单的基本信息，包括用户、金额、状态等
- */
 @Entity
 @Table(name = "orders")
 public class Order {
@@ -20,14 +17,12 @@ public class Order {
 
     private Long userId;
 
-    // 注意：这里使用 double 类型存储金额，存在精度问题
-    // 正确的做法应该使用 BigDecimal
-    private double totalAmount;
+    // 使用 BigDecimal 保证金额精度
+    @Column(precision = 12, scale = 2)
+    private BigDecimal totalAmount;
 
-    // 订单状态：CREATED, PAYING, PAID, SHIPPED, COMPLETED, CANCELLED
     private String status;
 
-    // 锁定的库存记录ID，用于取消订单时释放库存
     private Long inventoryLockedId;
 
     private LocalDateTime createTime;
@@ -37,7 +32,7 @@ public class Order {
     public Order() {
     }
 
-    public Order(String orderNo, Long userId, double totalAmount) {
+    public Order(String orderNo, Long userId, BigDecimal totalAmount) {
         this.orderNo = orderNo;
         this.userId = userId;
         this.totalAmount = totalAmount;
@@ -46,7 +41,6 @@ public class Order {
         this.updateTime = LocalDateTime.now();
     }
 
-    // Getters and Setters
     public Long getId() {
         return id;
     }
@@ -71,11 +65,11 @@ public class Order {
         this.userId = userId;
     }
 
-    public double getTotalAmount() {
+    public BigDecimal getTotalAmount() {
         return totalAmount;
     }
 
-    public void setTotalAmount(double totalAmount) {
+    public void setTotalAmount(BigDecimal totalAmount) {
         this.totalAmount = totalAmount;
     }
 

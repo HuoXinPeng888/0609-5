@@ -33,7 +33,7 @@ public class InventoryReconciliationJob {
      * 每小时执行一次对账
      * 以数据库库存为准，修正 Redis 中的库存数据
      */
-    @Scheduled(fixedRate = 3600000)  // 1小时 = 3600秒 — 间隔太长！
+    @Scheduled(fixedRate = 300000)  // 5分钟对账一次
     public void reconcile() {
         log.info("开始库存对账...");
 

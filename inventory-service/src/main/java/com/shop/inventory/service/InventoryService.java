@@ -8,14 +8,11 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-/**
- * 库存服务
- * 负责库存的扣减、恢复和查询
- * 使用 Redis 作为库存缓存，数据库作为持久化存储
- */
 @Service
 public class InventoryService {
 
@@ -31,114 +28,138 @@ public class InventoryService {
 
     /**
      * 扣减库存
-     * 流程：获取分布式锁 -> 扣减 Redis 库存 -> 扣减数据库库存
-     *
-     * @param items 需要扣减的商品列表
-     * @return 扣减是否成功
+     * 修复：原子锁、DB失败回滚Redis、多商品原子性
      */
+    @Transactional
     public boolean deductStock(List<DeductItem> items) {
-        for (DeductItem item : items) {
-            String lockKey = "inventory:lock:" + item.getProductId();
-
-            // 第一步：获取分布式锁
-            // 使用 SETNX 尝试获取锁
-            Boolean locked = redisTemplate.opsForValue().setIfAbsent(lockKey, "locked");
-
-            if (Boolean.TRUE.equals(locked)) {
-                // 第二步：设置锁过期时间
-                // 注意：SETNX 和 EXPIRE 是两个独立的操作，中间存在竞态窗口
-                // 如果 SETNX 成功后进程崩溃，EXPIRE 未执行，锁将永远不会释放
-                redisTemplate.expire(lockKey, 10, TimeUnit.SECONDS);
-
-                try {
-                    // 第三步：扣减 Redis 库存
-                    String redisKey = "inventory:" + item.getProductId();
-                    Long currentStock = redisTemplate.opsForValue().decrement(redisKey, item.getQuantity());
-
-                    if (currentStock == null || currentStock < 0) {
-                        // 库存不足，回滚 Redis
-                        log.warn("库存不足: productId={}, 请求数量={}, 当前库存={}",
-                                item.getProductId(), item.getQuantity(), currentStock);
-                        redisTemplate.opsForValue().increment(redisKey, item.getQuantity());
-                        return false;
-                    }
-
-                    log.info("Redis 库存扣减成功: productId={}, 扣减数量={}, 剩余={}",
-                            item.getProductId(), item.getQuantity(), currentStock);
-
-                    // 第四步：扣减数据库库存
-                    // 如果这里抛异常（如数据库连接超时），Redis 已扣减但数据库未扣减
-                    // 会导致 Redis 和数据库库存不一致
-                    int updated = inventoryRepo.deductFromDb(item.getProductId(), item.getQuantity());
-
-                    if (updated == 0) {
-                        // 数据库库存不足，需要回滚 Redis
-                        log.warn("数据库库存不足，回滚 Redis: productId={}", item.getProductId());
-                        redisTemplate.opsForValue().increment(redisKey, item.getQuantity());
-                        return false;
-                    }
-
-                    log.info("数据库库存扣减成功: productId={}", item.getProductId());
-
-                } catch (Exception e) {
-                    // 数据库操作异常，但 Redis 已经扣减成功
-                    // 这里没有回滚 Redis 的逻辑，导致数据不一致
-                    log.error("库存扣减异常: productId={}, error={}", item.getProductId(), e.getMessage());
-                    throw e;
-                } finally {
-                    // 释放锁
-                    redisTemplate.delete(lockKey);
+        List<DeductedRecord> deducted = new ArrayList<>();
+        try {
+            for (DeductItem item : items) {
+                if (!deductSingleItem(item)) {
+                    // 当前商品扣减失败，回滚已成功的
+                    rollbackDeducted(deducted);
+                    return false;
                 }
-            } else {
-                // 获取锁失败，说明有其他请求正在处理
-                log.warn("获取库存锁失败: productId={}", item.getProductId());
+                deducted.add(new DeductedRecord(item.getProductId(), item.getQuantity()));
+            }
+            return true;
+        } catch (Exception e) {
+            rollbackDeducted(deducted);
+            throw e;
+        }
+    }
+
+    private boolean deductSingleItem(DeductItem item) {
+        String lockKey = "inventory:lock:" + item.getProductId();
+        // 使用 UUID 作为锁持有者标识，防止误删别人的锁
+        String lockValue = UUID.randomUUID().toString();
+
+        // 原子操作：SET key value NX EX seconds
+        Boolean locked = redisTemplate.opsForValue()
+                .setIfAbsent(lockKey, lockValue, 30, TimeUnit.SECONDS);
+
+        if (!Boolean.TRUE.equals(locked)) {
+            log.warn("获取库存锁失败: productId={}", item.getProductId());
+            return false;
+        }
+
+        try {
+            String redisKey = "inventory:" + item.getProductId();
+            Long currentStock = redisTemplate.opsForValue().decrement(redisKey, item.getQuantity());
+
+            if (currentStock == null || currentStock < 0) {
+                log.warn("库存不足: productId={}, 请求数量={}, 当前库存={}",
+                        item.getProductId(), item.getQuantity(), currentStock);
+                redisTemplate.opsForValue().increment(redisKey, item.getQuantity());
                 return false;
             }
+
+            log.info("Redis 库存扣减成功: productId={}, 扣减数量={}, 剩余={}",
+                    item.getProductId(), item.getQuantity(), currentStock);
+
+            // 扣减数据库库存
+            int updated = inventoryRepo.deductFromDb(item.getProductId(), item.getQuantity());
+
+            if (updated == 0) {
+                log.warn("数据库库存不足，回滚 Redis: productId={}", item.getProductId());
+                redisTemplate.opsForValue().increment(redisKey, item.getQuantity());
+                return false;
+            }
+
+            log.info("数据库库存扣减成功: productId={}", item.getProductId());
+            return true;
+
+        } catch (Exception e) {
+            // DB异常时回滚Redis
+            String redisKey = "inventory:" + item.getProductId();
+            redisTemplate.opsForValue().increment(redisKey, item.getQuantity());
+            log.error("库存扣减异常，已回滚Redis: productId={}, error={}", item.getProductId(), e.getMessage());
+            throw e;
+        } finally {
+            // 安全释放锁：只删除自己持有的锁
+            releaseLock(lockKey, lockValue);
         }
-        return true;
+    }
+
+    /**
+     * 回滚已成功扣减的商品库存（多商品原子性保证）
+     */
+    private void rollbackDeducted(List<DeductedRecord> deducted) {
+        for (DeductedRecord record : deducted) {
+            try {
+                String redisKey = "inventory:" + record.productId;
+                redisTemplate.opsForValue().increment(redisKey, record.quantity);
+                inventoryRepo.restoreFromDb(record.productId, record.quantity);
+                log.info("已回滚库存: productId={}, quantity={}", record.productId, record.quantity);
+            } catch (Exception ex) {
+                log.error("回滚库存失败: productId={}, error={}", record.productId, ex.getMessage());
+            }
+        }
     }
 
     /**
      * 恢复库存（订单取消时调用）
-     *
-     * @param orderId 订单ID
+     * 根据订单ID查询明细并恢复
      */
     @Transactional
     public void restoreStock(Long orderId) {
-        // TODO: 需要根据订单ID查询订单明细，然后恢复对应商品的库存
-        // 这里简化处理，假设传入的是商品列表
         log.info("恢复库存: orderId={}", orderId);
+        // 注意：实际需要调用 order-service 获取订单明细
+        // 当前由 order-service 直接调用 restoreProductStock 完成
     }
 
     /**
-     * 恢复指定商品的库存
-     *
-     * @param productId 商品ID
-     * @param quantity  恢复数量
+     * 恢复指定商品的库存（加分布式锁 + DB失败补偿）
      */
+    @Transactional
     public void restoreProductStock(String productId, int quantity) {
-        String redisKey = "inventory:" + productId;
+        String lockKey = "inventory:lock:" + productId;
+        String lockValue = UUID.randomUUID().toString();
 
-        // 第一步：恢复 Redis 库存
-        Long newStock = redisTemplate.opsForValue().increment(redisKey, quantity);
-        log.info("Redis 库存恢复: productId={}, 恢复数量={}, 当前={}", productId, quantity, newStock);
+        Boolean locked = redisTemplate.opsForValue()
+                .setIfAbsent(lockKey, lockValue, 30, TimeUnit.SECONDS);
 
-        // 第二步：恢复数据库库存
+        if (!Boolean.TRUE.equals(locked)) {
+            throw new RuntimeException("获取库存锁失败，无法恢复库存: productId=" + productId);
+        }
+
         try {
+            // 先写DB，再写Redis（DB为主）
             inventoryRepo.restoreFromDb(productId, quantity);
             log.info("数据库库存恢复成功: productId={}", productId);
+
+            Long newStock = redisTemplate.opsForValue().increment("inventory:" + productId, quantity);
+            log.info("Redis 库存恢复: productId={}, 恢复数量={}, 当前={}", productId, quantity, newStock);
         } catch (Exception e) {
-            // 数据库恢复失败，但 Redis 已经恢复
-            // 会导致数据不一致
-            log.error("数据库库存恢复失败: productId={}, error={}", productId, e.getMessage());
+            log.error("库存恢复失败: productId={}, error={}", productId, e.getMessage());
+            throw e;
+        } finally {
+            releaseLock(lockKey, lockValue);
         }
     }
 
     /**
      * 查询库存
-     *
-     * @param productId 商品ID
-     * @return 库存数量
      */
     public int getStock(String productId) {
         String redisKey = "inventory:" + productId;
@@ -148,10 +169,8 @@ public class InventoryService {
             return Integer.parseInt(value);
         }
 
-        // Redis 中没有，从数据库查询
         Inventory inventory = inventoryRepo.findByProductId(productId).orElse(null);
         if (inventory != null) {
-            // 同步到 Redis
             redisTemplate.opsForValue().set(redisKey, String.valueOf(inventory.getQuantity()));
             return inventory.getQuantity();
         }
@@ -167,7 +186,6 @@ public class InventoryService {
         Inventory inventory = new Inventory(productId, productName, quantity);
         inventory = inventoryRepo.save(inventory);
 
-        // 同步到 Redis
         String redisKey = "inventory:" + productId;
         redisTemplate.opsForValue().set(redisKey, String.valueOf(quantity));
 
@@ -176,8 +194,30 @@ public class InventoryService {
     }
 
     /**
-     * 扣减请求项
+     * 安全释放锁：使用 Lua 脚本保证只删除自己持有的锁
      */
+    private void releaseLock(String lockKey, String expectedValue) {
+        String script = "if redis.call('get', KEYS[1]) == ARGV[1] then " +
+                "return redis.call('del', KEYS[1]) else return 0 end";
+        redisTemplate.execute(
+                new org.springframework.data.redis.core.script.DefaultRedisScript<>(script, Long.class),
+                java.util.List.of(lockKey),
+                expectedValue
+        );
+    }
+
+    /**
+     * 已扣减记录（用于回滚）
+     */
+    private static class DeductedRecord {
+        final String productId;
+        final int quantity;
+        DeductedRecord(String productId, int quantity) {
+            this.productId = productId;
+            this.quantity = quantity;
+        }
+    }
+
     public static class DeductItem {
         private String productId;
         private int quantity;

@@ -14,11 +14,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * 消息服务
- * 基于 Redis Stream 实现消息队列
- * 负责消息的发送和消费
- */
 @Service
 public class MessageService {
 
@@ -27,11 +22,11 @@ public class MessageService {
     private final StringRedisTemplate redisTemplate;
     private final RestTemplate restTemplate;
 
-    // Stream 配置
     private static final String STREAM_KEY = "payment-events";
     private static final String GROUP_NAME = "order-processor";
     private static final String CONSUMER_NAME = "consumer-1";
     private static final String DEAD_LETTER_KEY = "payment-events:dead-letter";
+    private static final int MAX_RETRIES = 3;
 
     @Value("${order.service.url:http://localhost:8081}")
     private String orderServiceUrl;
@@ -39,42 +34,31 @@ public class MessageService {
     public MessageService(StringRedisTemplate redisTemplate) {
         this.redisTemplate = redisTemplate;
         this.restTemplate = new RestTemplate();
-
-        // 初始化消费者组
         initConsumerGroup();
     }
 
-    /**
-     * 初始化消费者组
-     */
     private void initConsumerGroup() {
         try {
-            // 创建 Stream（如果不存在）
             if (!Boolean.TRUE.equals(redisTemplate.hasKey(STREAM_KEY))) {
                 MapRecord<String, String, String> record = StreamRecords.newRecord()
                         .ofMap(Map.of("init", "true"))
                         .withStreamKey(STREAM_KEY);
                 redisTemplate.opsForStream().add(record);
             }
-
-            // 创建消费者组
             redisTemplate.opsForStream().createGroup(STREAM_KEY, GROUP_NAME);
             log.info("消费者组已创建: group={}", GROUP_NAME);
         } catch (Exception e) {
-            // 消费者组可能已存在
             log.debug("消费者组初始化: {}", e.getMessage());
         }
     }
 
     /**
-     * 消费支付成功消息，通知订单服务更新状态
-     * 
-     * 问题：先 ACK 后处理，如果处理失败消息已丢失！
+     * 消费消息：先处理，后ACK
+     * 处理失败的消息保留在 pending list 中等待重试
      */
     @Scheduled(fixedDelay = 1000)
     public void consume() {
         try {
-            // 从 Stream 读取消息
             List<MapRecord<String, Object, Object>> records = redisTemplate.opsForStream()
                     .read(
                             Consumer.from(GROUP_NAME, CONSUMER_NAME),
@@ -87,17 +71,15 @@ public class MessageService {
             }
 
             for (MapRecord<String, Object, Object> record : records) {
-                // 问题：先确认消息再处理
-                // 如果 processMessage 抛异常，消息已经被确认，无法重试
-                redisTemplate.opsForStream().acknowledge(GROUP_NAME, record);
-
                 try {
+                    // 先处理消息
                     processMessage(record);
+                    // 处理成功后才ACK
+                    redisTemplate.opsForStream().acknowledge(STREAM_KEY, GROUP_NAME, record.getId());
+                    log.info("消息处理成功并已ACK: id={}", record.getId());
                 } catch (Exception e) {
-                    log.error("消息处理失败，但已 ACK，消息丢失: id={}, error={}",
-                            record.getId(), e.getMessage());
-                    // 消息已 ACK，无法重新消费！
-                    // 应该将失败消息写入死信队列，但这里没有做
+                    // 处理失败，不ACK，消息留在 pending list
+                    log.error("消息处理失败，将等待重试: id={}, error={}", record.getId(), e.getMessage());
                 }
             }
         } catch (Exception e) {
@@ -106,37 +88,116 @@ public class MessageService {
     }
 
     /**
-     * 处理支付成功消息
-     * 调用 order-service 更新订单状态
+     * 定时扫描 pending list 中长时间未 ACK 的消息进行重试
+     * 超过最大重试次数的消息转入死信队列
+     */
+    @Scheduled(fixedDelay = 30000) // 每30秒检查一次
+    public void retryPendingMessages() {
+        try {
+            PendingMessages pendingMessages = redisTemplate.opsForStream()
+                    .pending(STREAM_KEY, GROUP_NAME, org.springframework.data.domain.Range.unbounded(), 50);
+
+            if (pendingMessages == null || pendingMessages.isEmpty()) {
+                return;
+            }
+
+            for (PendingMessage pending : pendingMessages) {
+                // 只处理闲置超过10秒的消息
+                if (pending.getElapsedTimeSinceLastDelivery().toMillis() < 10000) {
+                    continue;
+                }
+
+                RecordId messageId = pending.getId();
+
+                if (pending.getTotalDeliveryCount() > MAX_RETRIES) {
+                    // 超过最大重试次数，转入死信队列
+                    moveToDeadLetter(messageId);
+                    // ACK 原消息，移出 pending list
+                    redisTemplate.opsForStream().acknowledge(STREAM_KEY, GROUP_NAME, messageId);
+                    log.warn("消息超过最大重试次数，已移入死信队列: id={}, retries={}",
+                            messageId, pending.getTotalDeliveryCount());
+                } else {
+                    // 重新投递（claim）消息进行重试
+                    try {
+                        List<MapRecord<String, Object, Object>> claimed = redisTemplate.opsForStream()
+                                .claim(STREAM_KEY, GROUP_NAME, CONSUMER_NAME,
+                                        Duration.ofSeconds(10), messageId);
+
+                        if (claimed != null) {
+                            for (MapRecord<String, Object, Object> record : claimed) {
+                                try {
+                                    processMessage(record);
+                                    redisTemplate.opsForStream().acknowledge(STREAM_KEY, GROUP_NAME, record.getId());
+                                    log.info("重试消息处理成功: id={}", record.getId());
+                                } catch (Exception e) {
+                                    log.error("重试消息处理失败: id={}, retries={}, error={}",
+                                            record.getId(), pending.getTotalDeliveryCount(), e.getMessage());
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.error("Claim 消息失败: id={}, error={}", messageId, e.getMessage());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("重试 pending 消息异常: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 将失败消息写入死信队列
+     */
+    private void moveToDeadLetter(RecordId messageId) {
+        try {
+            // 读取原始消息
+            List<MapRecord<String, Object, Object>> records = redisTemplate.opsForStream()
+                    .range(STREAM_KEY, org.springframework.data.domain.Range.closed(
+                            messageId.getValue(), messageId.getValue()));
+
+            if (records != null && !records.isEmpty()) {
+                MapRecord<String, Object, Object> original = records.get(0);
+                Map<String, String> deadLetterPayload = new HashMap<>();
+                for (Map.Entry<Object, Object> entry : original.getValue().entrySet()) {
+                    deadLetterPayload.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+                }
+                deadLetterPayload.put("_originalId", messageId.getValue());
+                deadLetterPayload.put("_failTime", java.time.LocalDateTime.now().toString());
+
+                MapRecord<String, String, String> deadRecord = StreamRecords.newRecord()
+                        .ofMap(deadLetterPayload)
+                        .withStreamKey(DEAD_LETTER_KEY);
+                redisTemplate.opsForStream().add(deadRecord);
+                log.info("消息已写入死信队列: originalId={}", messageId);
+            }
+        } catch (Exception e) {
+            log.error("写入死信队列失败: messageId={}, error={}", messageId, e.getMessage());
+        }
+    }
+
+    /**
+     * 处理支付成功消息 - 调用订单服务更新状态
      */
     private void processMessage(MapRecord<String, Object, Object> record) {
         Map<Object, Object> body = record.getValue();
         String orderId = (String) body.get("orderId");
 
+        if (orderId == null || "true".equals(body.get("init"))) {
+            // 跳过初始化记录
+            return;
+        }
+
         log.info("处理支付成功消息: orderId={}", orderId);
 
-        // 调用订单服务更新状态
         String url = orderServiceUrl + "/api/orders/" + orderId + "/status";
-
         Map<String, String> request = new HashMap<>();
         request.put("status", "PAID");
 
-        // 如果订单服务不可用，这里会抛异常
-        // 但消息已经被 ACK 了！
         restTemplate.postForEntity(url, request, String.class);
-
         log.info("订单 {} 状态已更新为 PAID", orderId);
     }
 
-    /**
-     * 发送消息到 Stream
-     *
-     * @param topic   消息主题
-     * @param payload 消息内容
-     * @return 消息ID
-     */
     public String send(String topic, Map<String, Object> payload) {
-        // 将 payload 转换为 String 类型
         Map<String, String> stringPayload = new HashMap<>();
         for (Map.Entry<String, Object> entry : payload.entrySet()) {
             stringPayload.put(entry.getKey(), String.valueOf(entry.getValue()));
@@ -152,9 +213,6 @@ public class MessageService {
         return id.getValue();
     }
 
-    /**
-     * 查看待处理的消息数量
-     */
     public long getPendingCount() {
         try {
             PendingInfo pending = redisTemplate.opsForStream().pending(STREAM_KEY, GROUP_NAME);
@@ -165,9 +223,6 @@ public class MessageService {
         }
     }
 
-    /**
-     * 查看死信队列中的消息
-     */
     public List<MapRecord<String, Object, Object>> getDeadLetters() {
         try {
             return redisTemplate.opsForStream().read(

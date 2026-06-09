@@ -36,6 +36,10 @@ mq:
   service:
     url: http://localhost:8084
 
+# 订单超时配置
+order:
+  pay-timeout-seconds: 1800  # PAYING 状态超时时间（秒），默认30分钟
+
 logging:
   level:
     com.shop.order: DEBUG
