@@ -1,0 +1,42 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:h2:mem:orderdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+# 库存服务地址
+inventory:
+  service:
+    url: http://localhost:8082
+
+# 支付服务地址
+payment:
+  service:
+    url: http://localhost:8083
+
+# 消息服务地址
+mq:
+  service:
+    url: http://localhost:8084
+
+logging:
+  level:
+    com.shop.order: DEBUG
+    org.springframework.web: INFO
