@@ -1,6 +1,7 @@
 package com.shop.payment.model;
 
 import javax.persistence.*;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
@@ -22,8 +23,8 @@ public class PaymentRecord {
     @Column(unique = true, nullable = false)
     private String paymentNo;
 
-    // 支付金额（使用 double，存在精度问题）
-    private double amount;
+    // 支付金额（使用 BigDecimal，保证精度）
+    private BigDecimal amount;
 
     // 支付状态：PENDING, PROCESSING, SUCCESS, FAILED
     private String status;
@@ -40,7 +41,7 @@ public class PaymentRecord {
     public PaymentRecord() {
     }
 
-    public PaymentRecord(String orderId, String paymentNo, double amount) {
+    public PaymentRecord(String orderId, String paymentNo, BigDecimal amount) {
         this.orderId = orderId;
         this.paymentNo = paymentNo;
         this.amount = amount;
@@ -74,11 +75,11 @@ public class PaymentRecord {
         this.paymentNo = paymentNo;
     }
 
-    public double getAmount() {
+    public BigDecimal getAmount() {
         return amount;
     }
 
-    public void setAmount(double amount) {
+    public void setAmount(BigDecimal amount) {
         this.amount = amount;
     }
 

@@ -68,8 +68,7 @@ public class MessageService {
 
     /**
      * 消费支付成功消息，通知订单服务更新状态
-     * 
-     * 问题：先 ACK 后处理，如果处理失败消息已丢失！
+     * 先处理消息，处理成功后再 ACK；处理失败则写入死信队列
      */
     @Scheduled(fixedDelay = 1000)
     public void consume() {
@@ -87,17 +86,16 @@ public class MessageService {
             }
 
             for (MapRecord<String, Object, Object> record : records) {
-                // 问题：先确认消息再处理
-                // 如果 processMessage 抛异常，消息已经被确认，无法重试
-                redisTemplate.opsForStream().acknowledge(GROUP_NAME, record);
-
                 try {
+                    // 先处理消息
                     processMessage(record);
+                    // 处理成功后再 ACK
+                    redisTemplate.opsForStream().acknowledge(GROUP_NAME, record);
+                    log.info("消息处理成功并 ACK: id={}", record.getId());
                 } catch (Exception e) {
-                    log.error("消息处理失败，但已 ACK，消息丢失: id={}, error={}",
-                            record.getId(), e.getMessage());
-                    // 消息已 ACK，无法重新消费！
-                    // 应该将失败消息写入死信队列，但这里没有做
+                    log.error("消息处理失败: id={}, error={}", record.getId(), e.getMessage());
+                    // 处理失败：不 ACK，写入死信队列
+                    sendToDeadLetter(record, e.getMessage());
                 }
             }
         } catch (Exception e) {
@@ -122,10 +120,33 @@ public class MessageService {
         request.put("status", "PAID");
 
         // 如果订单服务不可用，这里会抛异常
-        // 但消息已经被 ACK 了！
+        // 调用方会捕获异常并将消息写入死信队列
         restTemplate.postForEntity(url, request, String.class);
 
         log.info("订单 {} 状态已更新为 PAID", orderId);
+    }
+
+    /**
+     * 将处理失败的消息写入死信队列
+     *
+     * @param record 原始消息
+     * @param error  错误信息
+     */
+    private void sendToDeadLetter(MapRecord<String, Object, Object> record, String error) {
+        Map<String, String> deadLetterPayload = new HashMap<>();
+        Map<Object, Object> originalBody = record.getValue();
+        for (Map.Entry<Object, Object> entry : originalBody.entrySet()) {
+            deadLetterPayload.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+        }
+        deadLetterPayload.put("originalId", record.getId().getValue());
+        deadLetterPayload.put("error", error);
+        deadLetterPayload.put("failedAt", java.time.LocalDateTime.now().toString());
+
+        MapRecord<String, String, String> deadRecord = StreamRecords.newRecord()
+                .ofMap(deadLetterPayload)
+                .withStreamKey(DEAD_LETTER_KEY);
+        redisTemplate.opsForStream().add(deadRecord);
+        log.info("消息已写入死信队列: originalId={}, error={}", record.getId(), error);
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.shop.order.model;
 
 import javax.persistence.*;
+import java.math.BigDecimal;
 
 /**
  * 订单明细实体类
@@ -20,15 +21,15 @@ public class OrderItem {
 
     private String productName;
 
-    // 商品单价，使用 double 存在精度问题
-    private double price;
+    // 商品单价，使用 BigDecimal 保证精度
+    private BigDecimal price;
 
     private int quantity;
 
     public OrderItem() {
     }
 
-    public OrderItem(Long orderId, String productId, String productName, double price, int quantity) {
+    public OrderItem(Long orderId, String productId, String productName, BigDecimal price, int quantity) {
         this.orderId = orderId;
         this.productId = productId;
         this.productName = productName;
@@ -69,11 +70,11 @@ public class OrderItem {
         this.productName = productName;
     }
 
-    public double getPrice() {
+    public BigDecimal getPrice() {
         return price;
     }
 
-    public void setPrice(double price) {
+    public void setPrice(BigDecimal price) {
         this.price = price;
     }
 

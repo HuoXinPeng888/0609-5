@@ -13,9 +13,14 @@ import com.shop.order.repository.OrderRepository;
 import com.shop.order.repository.OrderItemRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -26,9 +31,13 @@ import java.util.stream.Collectors;
  * 负责订单的创建、支付发起、取消等核心业务
  */
 @Service
+@EnableScheduling
 public class OrderService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+
+    @Value("${order.pay.timeout.minutes:30}")
+    private int payTimeoutMinutes;
 
     private final OrderRepository orderRepo;
     private final OrderItemRepository orderItemRepo;
@@ -56,10 +65,10 @@ public class OrderService {
     @Transactional
     public Order createOrder(Long userId, List<OrderItem> items) {
         // 第一步：计算订单总金额
-        // 使用 double 进行金额计算，存在精度丢失风险
-        double totalAmount = 0.0;
+        // 使用 BigDecimal 进行金额计算，保证精度
+        BigDecimal totalAmount = BigDecimal.ZERO;
         for (OrderItem item : items) {
-            totalAmount += item.getPrice() * item.getQuantity();
+            totalAmount = totalAmount.add(item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())));
         }
         log.info("计算订单总金额: {}", totalAmount);
 
@@ -199,5 +208,31 @@ public class OrderService {
         }
 
         return orderRepo.save(order);
+    }
+
+    /**
+     * 定时扫描超时的 PAYING 订单，自动取消并释放库存
+     * 超时时间通过 order.pay.timeout.minutes 配置，默认 30 分钟
+     */
+    @Scheduled(fixedDelay = 60000)
+    public void cancelExpiredPayingOrders() {
+        LocalDateTime cutoff = LocalDateTime.now().minusMinutes(payTimeoutMinutes);
+        List<Order> expiredOrders = orderRepo.findByStatusAndCreateTimeBefore(
+                OrderStateMachine.PAYING, cutoff);
+
+        if (!expiredOrders.isEmpty()) {
+            log.info("发现 {} 个超时 PAYING 订单，开始自动取消", expiredOrders.size());
+        }
+
+        for (Order order : expiredOrders) {
+            try {
+                log.info("自动取消超时订单: orderNo={}, createTime={}",
+                        order.getOrderNo(), order.getCreateTime());
+                cancelOrder(order.getId());
+            } catch (Exception e) {
+                log.error("自动取消超时订单失败: orderNo={}, error={}",
+                        order.getOrderNo(), e.getMessage());
+            }
+        }
     }
 }

@@ -13,8 +13,6 @@ import java.util.List;
 /**
  * 库存对账定时任务
  * 对比 Redis 库存和数据库库存，以数据库为准修正 Redis
- * 
- * 问题：对账间隔 1 小时太长，高并发下 1 小时内的超卖已造成损失
  */
 @Component
 public class InventoryReconciliationJob {
@@ -30,10 +28,10 @@ public class InventoryReconciliationJob {
     }
 
     /**
-     * 每小时执行一次对账
+     * 每 5 分钟执行一次对账
      * 以数据库库存为准，修正 Redis 中的库存数据
      */
-    @Scheduled(fixedRate = 3600000)  // 1小时 = 3600秒 — 间隔太长！
+    @Scheduled(fixedRate = 300000)  // 5分钟
     public void reconcile() {
         log.info("开始库存对账...");
 

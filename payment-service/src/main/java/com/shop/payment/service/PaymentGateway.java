@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.util.Random;
 import java.util.UUID;
 
@@ -26,7 +27,7 @@ public class PaymentGateway {
      * @param paymentNo 支付单号
      * @return 网关处理结果
      */
-    public GatewayResult charge(String orderId, double amount, String paymentNo) {
+    public GatewayResult charge(String orderId, BigDecimal amount, String paymentNo) {
         log.info("调用支付网关扣款: orderId={}, amount={}, paymentNo={}", orderId, amount, paymentNo);
 
         // 模拟网络延迟：500ms - 3000ms
@@ -64,7 +65,7 @@ public class PaymentGateway {
      * @param gatewayTxnId 原交易号
      * @return 网关处理结果
      */
-    public GatewayResult refund(String orderId, double amount, String gatewayTxnId) {
+    public GatewayResult refund(String orderId, BigDecimal amount, String gatewayTxnId) {
         log.info("调用支付网关退款: orderId={}, amount={}, gatewayTxnId={}", orderId, amount, gatewayTxnId);
 
         // 模拟网络延迟

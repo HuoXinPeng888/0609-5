@@ -3,6 +3,8 @@ package com.shop.order.client;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
+
 /**
  * 支付服务 Feign 客户端
  * 用于调用 payment-service 的支付相关接口
@@ -33,12 +35,12 @@ public interface PaymentClient {
      */
     class PaymentRequest {
         private String orderId;
-        private double amount;
+        private BigDecimal amount;
 
         public PaymentRequest() {
         }
 
-        public PaymentRequest(String orderId, double amount) {
+        public PaymentRequest(String orderId, BigDecimal amount) {
             this.orderId = orderId;
             this.amount = amount;
         }
@@ -51,11 +53,11 @@ public interface PaymentClient {
             this.orderId = orderId;
         }
 
-        public double getAmount() {
+        public BigDecimal getAmount() {
             return amount;
         }
 
-        public void setAmount(double amount) {
+        public void setAmount(BigDecimal amount) {
             this.amount = amount;
         }
     }
@@ -108,12 +110,12 @@ public interface PaymentClient {
     class PaymentStatusResponse {
         private String orderId;
         private String status;
-        private double amount;
+        private BigDecimal amount;
 
         public PaymentStatusResponse() {
         }
 
-        public PaymentStatusResponse(String orderId, String status, double amount) {
+        public PaymentStatusResponse(String orderId, String status, BigDecimal amount) {
             this.orderId = orderId;
             this.status = status;
             this.amount = amount;
@@ -135,11 +137,11 @@ public interface PaymentClient {
             this.status = status;
         }
 
-        public double getAmount() {
+        public BigDecimal getAmount() {
             return amount;
         }
 
-        public void setAmount(double amount) {
+        public void setAmount(BigDecimal amount) {
             this.amount = amount;
         }
     }

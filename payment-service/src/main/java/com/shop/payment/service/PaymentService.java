@@ -6,10 +6,13 @@ import com.shop.payment.client.MqClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 支付服务
@@ -41,16 +44,67 @@ public class PaymentService {
      * @param amount  支付金额
      * @return 支付结果
      */
-    public PaymentResult processPayment(String orderId, double amount) {
-        // 缺少幂等性检查！
-        // 正确做法：先查询是否存在 SUCCESS 状态的支付记录
-        // PaymentRecord existing = paymentRepo.findByOrderIdAndStatus(orderId, "SUCCESS");
-        // if (existing != null) {
-        //     return new PaymentResult(true, existing.getPaymentNo(), "已支付");
-        // }
+    public PaymentResult processPayment(String orderId, BigDecimal amount) {
+        // Step 1: Idempotency + create PROCESSING record (in its own transaction)
+        PaymentRecord record;
+        try {
+            record = createProcessingRecord(orderId, amount);
+        } catch (Exception e) {
+            // Duplicate payment or DB error
+            throw new RuntimeException("支付请求处理失败: " + e.getMessage(), e);
+        }
 
-        // 直接创建新的支付记录
-        String paymentNo = "PAY-" + System.currentTimeMillis();
+        // Step 2: Call payment gateway (outside transaction)
+        PaymentGateway.GatewayResult result;
+        try {
+            result = paymentGateway.charge(orderId, amount, record.getPaymentNo());
+        } catch (Exception e) {
+            // Gateway timeout - record stays PROCESSING
+            record.setErrorMessage("网关调用异常: " + e.getMessage());
+            record.setUpdateTime(LocalDateTime.now());
+            paymentRepo.save(record);
+            throw new RuntimeException("支付处理异常: " + e.getMessage(), e);
+        }
+
+        // Step 3: Update record based on result
+        if (result.isSuccess()) {
+            record.setStatus("SUCCESS");
+            record.setGatewayTxnId(result.getTxnId());
+            record.setUpdateTime(LocalDateTime.now());
+            paymentRepo.save(record);
+
+            // Send MQ message
+            try {
+                mqClient.send("payment.success", Map.of(
+                    "orderId", orderId,
+                    "paymentNo", record.getPaymentNo(),
+                    "amount", amount.toString()
+                ));
+            } catch (Exception e) {
+                log.error("发送支付成功消息失败: {}", e.getMessage());
+            }
+
+            return new PaymentResult(true, record.getPaymentNo(), "支付成功");
+        } else {
+            record.setStatus("FAILED");
+            record.setErrorMessage(result.getMessage());
+            record.setUpdateTime(LocalDateTime.now());
+            paymentRepo.save(record);
+            return new PaymentResult(false, record.getPaymentNo(), result.getMessage());
+        }
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public PaymentRecord createProcessingRecord(String orderId, BigDecimal amount) {
+        // Idempotency: check existing SUCCESS payment
+        PaymentRecord existing = paymentRepo.findByOrderIdAndStatus(orderId, "SUCCESS")
+            .orElse(null);
+        if (existing != null) {
+            throw new RuntimeException("该订单已支付成功，请勿重复操作");
+        }
+
+        // Create new PROCESSING record
+        String paymentNo = "PAY-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16).toUpperCase();
         PaymentRecord record = new PaymentRecord();
         record.setOrderId(orderId);
         record.setPaymentNo(paymentNo);
@@ -58,63 +112,7 @@ public class PaymentService {
         record.setStatus("PROCESSING");
         record.setCreateTime(LocalDateTime.now());
         record.setUpdateTime(LocalDateTime.now());
-        paymentRepo.save(record);
-
-        log.info("创建支付记录: orderId={}, paymentNo={}, amount={}", orderId, paymentNo, amount);
-
-        try {
-            // 调用第三方支付网关
-            // 网关可能超时，导致支付状态不确定
-            PaymentGateway.GatewayResult result = paymentGateway.charge(orderId, amount, paymentNo);
-
-            if (result.isSuccess()) {
-                // 支付成功
-                record.setStatus("SUCCESS");
-                record.setGatewayTxnId(result.getTxnId());
-                record.setUpdateTime(LocalDateTime.now());
-                paymentRepo.save(record);
-
-                log.info("支付成功: orderId={}, paymentNo={}, txnId={}",
-                        orderId, paymentNo, result.getTxnId());
-
-                // 发送支付成功消息到 MQ
-                // 通知订单服务更新订单状态
-                try {
-                    mqClient.send("payment.success", Map.of(
-                            "orderId", orderId,
-                            "paymentNo", paymentNo,
-                            "amount", amount
-                    ));
-                    log.info("支付成功消息已发送: orderId={}", orderId);
-                } catch (Exception e) {
-                    // MQ 发送失败，但支付已成功
-                    // 订单状态可能无法及时更新
-                    log.error("发送支付成功消息失败: {}", e.getMessage());
-                }
-
-                return new PaymentResult(true, paymentNo, "支付成功");
-            } else {
-                // 支付失败
-                record.setStatus("FAILED");
-                record.setErrorMessage(result.getMessage());
-                record.setUpdateTime(LocalDateTime.now());
-                paymentRepo.save(record);
-
-                log.warn("支付失败: orderId={}, message={}", orderId, result.getMessage());
-                return new PaymentResult(false, paymentNo, result.getMessage());
-            }
-        } catch (Exception e) {
-            // 网关超时或其他异常
-            // 支付状态不确定，记录为 PROCESSING
-            // 调用方可能会重试，但因为没有幂等控制，重试会创建新的支付记录！
-            record.setStatus("PROCESSING");
-            record.setErrorMessage("网关调用异常: " + e.getMessage());
-            record.setUpdateTime(LocalDateTime.now());
-            paymentRepo.save(record);
-
-            log.error("支付网关调用异常: orderId={}, error={}", orderId, e.getMessage());
-            throw new RuntimeException("支付处理异常: " + e.getMessage(), e);
-        }
+        return paymentRepo.save(record);
     }
 
     /**
@@ -150,6 +148,10 @@ public class PaymentService {
     public PaymentResult refund(Long paymentId) {
         PaymentRecord record = paymentRepo.findById(paymentId)
                 .orElseThrow(() -> new RuntimeException("支付记录不存在: id=" + paymentId));
+
+        if ("REFUNDED".equals(record.getStatus())) {
+            return new PaymentResult(true, record.getPaymentNo(), "已退款，请勿重复操作");
+        }
 
         if (!"SUCCESS".equals(record.getStatus())) {
             throw new RuntimeException("只有支付成功的订单才能退款");

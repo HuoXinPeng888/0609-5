@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.util.Map;
 
 /**
@@ -97,7 +98,7 @@ public class PaymentController {
      */
     public static class PaymentRequest {
         private String orderId;
-        private double amount;
+        private BigDecimal amount;
 
         public String getOrderId() {
             return orderId;
@@ -107,11 +108,11 @@ public class PaymentController {
             this.orderId = orderId;
         }
 
-        public double getAmount() {
+        public BigDecimal getAmount() {
             return amount;
         }
 
-        public void setAmount(double amount) {
+        public void setAmount(BigDecimal amount) {
             this.amount = amount;
         }
     }
